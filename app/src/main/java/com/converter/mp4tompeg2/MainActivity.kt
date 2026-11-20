@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.view.View
 import android.widget.Button
 import android.widget.ProgressBar
@@ -17,6 +18,7 @@ import com.arthenica.ffmpegkit.ReturnCode
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.text.Normalizer
 
 class MainActivity : AppCompatActivity() {
 
@@ -41,6 +43,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun getCleanFileName(uri: Uri): String {
+        var rawName = "Video_${System.currentTimeMillis()}"
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (nameIndex != -1) {
+                    val displayName = cursor.getString(nameIndex)
+                    if (!displayName.isNullOrBlank()) {
+                        rawName = displayName
+                    }
+                }
+            }
+        }
+
+        val nameWithoutExt = rawName.substringBeforeLast(".")
+        val normalized = Normalizer.normalize(nameWithoutExt, Normalizer.Form.NFD)
+            .replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
+        val safeName = normalized
+            .replace(Regex("[^a-zA-Z0-9._-]+"), "_")
+            .trim('_')
+
+        val finalBaseName = if (safeName.isNotEmpty()) safeName else "Video_${System.currentTimeMillis()}"
+        return "$finalBaseName.mpg"
+    }
+
     private fun startConversion(uri: Uri) {
         btnSelect.isEnabled = false
         progressBar.visibility = View.VISIBLE
@@ -48,6 +75,7 @@ class MainActivity : AppCompatActivity() {
 
         Thread {
             try {
+                val outputFileName = getCleanFileName(uri)
                 val inputFile = File(cacheDir, "input_temp.mp4")
                 contentResolver.openInputStream(uri)?.use { input ->
                     FileOutputStream(inputFile).use { output ->
@@ -55,11 +83,10 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                val outputFileName = "Estereo_${System.currentTimeMillis()}.mpg"
                 val tempOutputFile = File(cacheDir, outputFileName)
 
                 runOnUiThread {
-                    tvStatus.text = "Convirtiendo a MPEG-2 (480p) + MP2 (320kbps)...\nEsto puede tardar unos minutos."
+                    tvStatus.text = "Convirtiendo $outputFileName\na MPEG-2 (480p) + MP2 (320kbps)...\nEsto puede tardar unos minutos."
                 }
 
                 val cmd = "-y -i \"${inputFile.absolutePath}\" -vf \"scale=-2:480\" -c:v mpeg2video -q:v 4 -c:a mp2 -b:a 320k -ar 44100 \"${tempOutputFile.absolutePath}\""
@@ -110,7 +137,13 @@ class MainActivity : AppCompatActivity() {
             }
         } else {
             val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            val destFile = File(downloadsDir, fileName)
+            var destFile = File(downloadsDir, fileName)
+            var counter = 1
+            val baseName = fileName.substringBeforeLast(".")
+            while (destFile.exists()) {
+                destFile = File(downloadsDir, "$baseName($counter).mpg")
+                counter++
+            }
             FileInputStream(sourceFile).use { input ->
                 FileOutputStream(destFile).use { out ->
                     input.copyTo(out)
