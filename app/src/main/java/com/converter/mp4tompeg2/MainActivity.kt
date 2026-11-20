@@ -26,8 +26,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var progressBar: ProgressBar
     private lateinit var tvStatus: TextView
 
-    private val pickVideo = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        uri?.let { startConversion(it) }
+    private val pickVideos = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris: List<Uri> ->
+        if (uris.isNotEmpty()) {
+            startBatchConversion(uris)
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -38,86 +40,99 @@ class MainActivity : AppCompatActivity() {
         progressBar = findViewById(R.id.progressBar)
         tvStatus = findViewById(R.id.tvStatus)
 
+        btnSelect.text = "Seleccionar Videos MP4"
         btnSelect.setOnClickListener {
-            pickVideo.launch("video/mp4")
+            pickVideos.launch("video/mp4")
         }
     }
 
+    private fun startBatchConversion(uris: List<Uri>) {
+        btnSelect.isEnabled = false
+        progressBar.visibility = View.VISIBLE
+        val total = uris.size
+        tvStatus.text = "Iniciando lote de $total video(s)..."
+
+        Thread {
+            var successCount = 0
+            val savedNames = mutableListOf<String>()
+
+            for ((index, uri) in uris.withIndex()) {
+                val currentNum = index + 1
+                try {
+                    val originalName = getCleanFileName(uri)
+                    val outputFileName = "$originalName.mpg"
+
+                    runOnUiThread {
+                        tvStatus.text = "Preparando $currentNum de $total:\n$originalName.mp4"
+                    }
+
+                    val inputFile = File(cacheDir, "input_temp_$index.mp4")
+                    contentResolver.openInputStream(uri)?.use { input ->
+                        FileOutputStream(inputFile).use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+
+                    val tempOutputFile = File(cacheDir, outputFileName)
+
+                    runOnUiThread {
+                        tvStatus.text = "Convirtiendo $currentNum de $total:\n$outputFileName\n(MPEG-2 480p • MP2 320kbps)"
+                    }
+
+                    val cmd = "-y -i \"${inputFile.absolutePath}\" -vf \"scale=-2:480\" -c:v mpeg2video -q:v 4 -c:a mp2 -b:a 320k -ar 44100 \"${tempOutputFile.absolutePath}\""
+
+                    val session = FFmpegKit.execute(cmd)
+
+                    if (ReturnCode.isSuccess(session.returnCode)) {
+                        saveToDownloads(tempOutputFile, outputFileName)
+                        successCount++
+                        savedNames.add(outputFileName)
+                    }
+
+                    inputFile.delete()
+                    tempOutputFile.delete()
+
+                } catch (e: Exception) {
+                    runOnUiThread {
+                        tvStatus.text = "Error en video $currentNum: ${e.message}"
+                    }
+                }
+            }
+
+            runOnUiThread {
+                progressBar.visibility = View.GONE
+                btnSelect.isEnabled = true
+                if (successCount > 0) {
+                    val listText = savedNames.joinToString("\n• ", prefix = "• ")
+                    tvStatus.text = "¡Listo! Se guardaron $successCount de $total en Descargas:\n\n$listText"
+                } else {
+                    tvStatus.text = "No se pudo convertir ningún video."
+                }
+            }
+        }.start()
+    }
+
     private fun getCleanFileName(uri: Uri): String {
-        var rawName = "Video_${System.currentTimeMillis()}"
+        var name = "Estereo_${System.currentTimeMillis()}"
         contentResolver.query(uri, null, null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
                 val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 if (nameIndex != -1) {
-                    val displayName = cursor.getString(nameIndex)
-                    if (!displayName.isNullOrBlank()) {
-                        rawName = displayName
+                    val rawName = cursor.getString(nameIndex)
+                    if (!rawName.isNullOrBlank()) {
+                        name = rawName.substringBeforeLast(".")
                     }
                 }
             }
         }
-
-        val nameWithoutExt = rawName.substringBeforeLast(".")
-        val normalized = Normalizer.normalize(nameWithoutExt, Normalizer.Form.NFD)
-            .replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
-        val safeName = normalized
-            .replace(Regex("[^a-zA-Z0-9._-]+"), "_")
+        val normalized = Normalizer.normalize(name, Normalizer.Form.NFD)
+            .replace("\\p{InCombiningDiacriticalMarks}+".toRegex(), "")
+        val cleaned = normalized
+            .replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+            .replace("_+".toRegex(), "_")
             .trim('_')
 
-        val finalBaseName = if (safeName.isNotEmpty()) safeName else "Video_${System.currentTimeMillis()}"
-        return "$finalBaseName.mpg"
-    }
-
-    private fun startConversion(uri: Uri) {
-        btnSelect.isEnabled = false
-        progressBar.visibility = View.VISIBLE
-        tvStatus.text = "Preparando video..."
-
-        Thread {
-            try {
-                val outputFileName = getCleanFileName(uri)
-                val inputFile = File(cacheDir, "input_temp.mp4")
-                contentResolver.openInputStream(uri)?.use { input ->
-                    FileOutputStream(inputFile).use { output ->
-                        input.copyTo(output)
-                    }
-                }
-
-                val tempOutputFile = File(cacheDir, outputFileName)
-
-                runOnUiThread {
-                    tvStatus.text = "Convirtiendo $outputFileName\na MPEG-2 (480p) + MP2 (320kbps)...\nEsto puede tardar unos minutos."
-                }
-
-                val cmd = "-y -i \"${inputFile.absolutePath}\" -vf \"scale=-2:480\" -c:v mpeg2video -q:v 4 -c:a mp2 -b:a 320k -ar 44100 \"${tempOutputFile.absolutePath}\""
-
-                val session = FFmpegKit.execute(cmd)
-
-                if (ReturnCode.isSuccess(session.returnCode)) {
-                    saveToDownloads(tempOutputFile, outputFileName)
-                    runOnUiThread {
-                        tvStatus.text = "¡Listo! Guardado en Descargas como:\n$outputFileName"
-                    }
-                } else {
-                    runOnUiThread {
-                        tvStatus.text = "Error al convertir el video."
-                    }
-                }
-
-                inputFile.delete()
-                tempOutputFile.delete()
-
-            } catch (e: Exception) {
-                runOnUiThread {
-                    tvStatus.text = "Error: ${e.message}"
-                }
-            } finally {
-                runOnUiThread {
-                    progressBar.visibility = View.GONE
-                    btnSelect.isEnabled = true
-                }
-            }
-        }.start()
+        return cleaned.ifEmpty { "Estereo_${System.currentTimeMillis()}" }
     }
 
     private fun saveToDownloads(sourceFile: File, fileName: String) {
@@ -137,13 +152,7 @@ class MainActivity : AppCompatActivity() {
             }
         } else {
             val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            var destFile = File(downloadsDir, fileName)
-            var counter = 1
-            val baseName = fileName.substringBeforeLast(".")
-            while (destFile.exists()) {
-                destFile = File(downloadsDir, "$baseName($counter).mpg")
-                counter++
-            }
+            val destFile = File(downloadsDir, fileName)
             FileInputStream(sourceFile).use { input ->
                 FileOutputStream(destFile).use { out ->
                     input.copyTo(out)
